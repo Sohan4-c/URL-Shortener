@@ -9,8 +9,11 @@ class ShortenRequest(BaseModel):
     @field_validator("custom_code")
     @classmethod
     def validate_custom_code(cls, value):
-        if value is not None and not value.replace("-", "").replace("_", "").isalnum():
-            raise ValueError("custom_code may contain only letters, numbers, '-' and '_'")
+        if value is not None:
+            if value.lower() in {"health", "shorten", "stats", "docs", "openapi.json", "redoc", "favicon.ico"}:
+                raise ValueError("custom_code cannot use reserved route names")
+            if not value.replace("-", "").replace("_", "").isalnum():
+                raise ValueError("custom_code may contain only letters, numbers, '-' and '_'")
         return value
 
 class ShortenResponse(BaseModel):

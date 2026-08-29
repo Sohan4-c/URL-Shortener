@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
+# pyrefly: ignore [missing-import]
 from fastapi.responses import JSONResponse, RedirectResponse
 from mangum import Mangum
 
@@ -13,9 +14,17 @@ service = URLService()
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = [
+        {
+            "loc": list(err.get("loc", [])),
+            "msg": str(err.get("msg", "")),
+            "type": err.get("type", ""),
+        }
+        for err in exc.errors()
+    ]
     return JSONResponse(
         status_code=400,
-        content={"detail": "Invalid request", "errors": exc.errors()},
+        content={"detail": "Invalid request", "errors": errors},
     )
 
 @app.exception_handler(Exception)
@@ -85,6 +94,8 @@ def shorten(payload: ShortenRequest, request: Request):
 
 @app.get("/stats/{code}", response_model=StatsResponse)
 def stats(code: str):
+    if len(code) > 64:
+        raise HTTPException(status_code=404, detail="Short URL not found")
     data = service.stats(code)
     if not data:
         raise HTTPException(status_code=404, detail="Short URL not found")
@@ -92,6 +103,8 @@ def stats(code: str):
 
 @app.delete("/{code}", response_model=DeleteResponse)
 def delete(code: str):
+    if len(code) > 64:
+        raise HTTPException(status_code=404, detail="Short URL not found")
     item = service.delete(code)
     if not item:
         raise HTTPException(status_code=404, detail="Short URL not found")
@@ -99,6 +112,8 @@ def delete(code: str):
 
 @app.get("/{code}", include_in_schema=False)
 def redirect(code: str):
+    if len(code) > 64:
+        raise HTTPException(status_code=404, detail="Short URL not found")
     target, status = service.redirect(code)
     if status == 404:
         raise HTTPException(status_code=404, detail="Short URL not found")
