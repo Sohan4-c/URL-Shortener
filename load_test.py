@@ -1,21 +1,31 @@
 import concurrent.futures
 import json
+import os
 import statistics
 import time
 from datetime import datetime, timezone
 import requests
 
-BASE_URL = "http://localhost:8000"
-NUM_REQUESTS = 500
-CONCURRENCY = 20
+BASE_URL = os.getenv("LOAD_TEST_URL", "https://4ilud0m56g.execute-api.us-east-1.amazonaws.com/Prod").rstrip("/")
+NUM_REQUESTS = int(os.getenv("NUM_REQUESTS", "100"))
+CONCURRENCY = int(os.getenv("CONCURRENCY", "10"))
 
 def create_url():
     payload = {"url": f"https://example.com/page/{time.time_ns()}", "ttl_days": 1}
-    r = requests.post(f"{BASE_URL}/shorten", json=payload, timeout=10)
-    return r.json()["short_code"] if r.status_code == 201 else None
+    try:
+        r = requests.post(f"{BASE_URL}/shorten", json=payload, timeout=15)
+        if r.status_code == 201:
+            return r.json().get("short_code"), True
+    except Exception:
+        pass
+    return None, False
 
 def get_redirect(code):
-    return requests.get(f"{BASE_URL}/{code}", allow_redirects=False, timeout=10).status_code
+    try:
+        r = requests.get(f"{BASE_URL}/{code}", allow_redirects=False, timeout=15)
+        return r.status_code == 307
+    except Exception:
+        return False
 
 def percentile(values, p):
     values = sorted(values)
@@ -23,54 +33,76 @@ def percentile(values, p):
 
 def measure_create():
     latencies, codes = [], []
+    successes = 0
     def task():
         start = time.perf_counter()
-        code = create_url()
-        return (time.perf_counter() - start) * 1000, code
+        code, ok = create_url()
+        return (time.perf_counter() - start) * 1000, code, ok
     with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
         for f in concurrent.futures.as_completed([ex.submit(task) for _ in range(NUM_REQUESTS)]):
-            latency, code = f.result()
+            latency, code, ok = f.result()
             latencies.append(latency)
-            if code:
+            if ok:
+                successes += 1
                 codes.append(code)
-    return latencies, codes
+    return latencies, codes, successes
 
 def measure_redirect(codes):
     latencies = []
+    successes = 0
     test_codes = (codes * 5)[:NUM_REQUESTS]
     def task(code):
         start = time.perf_counter()
-        status = get_redirect(code)
-        return (time.perf_counter() - start) * 1000, status
+        ok = get_redirect(code)
+        return (time.perf_counter() - start) * 1000, ok
     with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
         for f in concurrent.futures.as_completed([ex.submit(task, c) for c in test_codes]):
-            latency, _ = f.result()
+            latency, ok = f.result()
             latencies.append(latency)
-    return latencies
+            if ok:
+                successes += 1
+    return latencies, successes
 
-def print_stats(name, latencies):
+def print_stats(name, latencies, successes, total):
+    rate = (successes / total) * 100 if total else 0
     print(f"\n=== {name} ===")
-    print(f"Total: {len(latencies)}")
-    print(f"Min: {min(latencies):.2f} ms")
-    print(f"Mean: {statistics.mean(latencies):.2f} ms")
-    print(f"Median/P50: {statistics.median(latencies):.2f} ms")
-    print(f"P95: {percentile(latencies, .95):.2f} ms")
-    print(f"P99: {percentile(latencies, .99):.2f} ms")
+    print(f"Requests: {total}")
+    print(f"Concurrency: {CONCURRENCY}")
+    print(f"Success Rate: {rate:.1f}%")
+    print(f"Average Latency: {statistics.mean(latencies):.2f} ms")
+    print(f"P50 Latency: {statistics.median(latencies):.2f} ms")
+    print(f"P95 Latency: {percentile(latencies, .95):.2f} ms")
+    print(f"P99 Latency: {percentile(latencies, .99):.2f} ms")
 
 if __name__ == "__main__":
-    print("Starting:", datetime.now(timezone.utc).isoformat())
-    creates, codes = measure_create()
-    print_stats("POST /shorten", creates)
+    print(f"Target: {BASE_URL}")
+    print(f"Starting at {datetime.now(timezone.utc).isoformat()} with {NUM_REQUESTS} requests, concurrency {CONCURRENCY}...")
+    creates, codes, create_successes = measure_create()
+    print_stats("Load Test: POST /shorten", creates, create_successes, len(creates))
     if codes:
-        redirects = measure_redirect(codes)
-        print_stats("GET /{code}", redirects)
+        redirects, redirect_successes = measure_redirect(codes)
+        print_stats("Load Test: GET /{code} (Redirect)", redirects, redirect_successes, len(redirects))
         results = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "base_url": BASE_URL,
             "concurrency": CONCURRENCY,
-            "create": {"count": len(creates), "p50_ms": percentile(creates,.50), "p95_ms": percentile(creates,.95), "p99_ms": percentile(creates,.99)},
-            "redirect": {"count": len(redirects), "p50_ms": percentile(redirects,.50), "p95_ms": percentile(redirects,.95), "p99_ms": percentile(redirects,.99)},
+            "create": {
+                "count": len(creates),
+                "success_rate": f"{(create_successes / len(creates)) * 100:.1f}%",
+                "mean_ms": round(statistics.mean(creates), 2),
+                "p50_ms": round(percentile(creates, .50), 2),
+                "p95_ms": round(percentile(creates, .95), 2),
+                "p99_ms": round(percentile(creates, .99), 2),
+            },
+            "redirect": {
+                "count": len(redirects),
+                "success_rate": f"{(redirect_successes / len(redirects)) * 100:.1f}%",
+                "mean_ms": round(statistics.mean(redirects), 2),
+                "p50_ms": round(percentile(redirects, .50), 2),
+                "p95_ms": round(percentile(redirects, .95), 2),
+                "p99_ms": round(percentile(redirects, .99), 2),
+            },
         }
         with open("load_test_results.json", "w") as f:
             json.dump(results, f, indent=2)
-        print("Results saved to load_test_results.json")
+        print("\nReal load test results saved to load_test_results.json")
