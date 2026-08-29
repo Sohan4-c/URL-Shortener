@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless URL shortener with API Gateway, Lambda, and DynamoDB
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 256
+    Runtime: python3.11
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        APP_ENV: production
+        DYNAMODB_TABLE: !Ref URLTable
+
+Parameters:
+  StageName:
+    Type: String
+    Default: Prod
+
+Resources:
+  URLTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: shortCode
+          AttributeType: S
+      KeySchema:
+        - AttributeName: shortCode
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: url-shortener
+        - Key: Environment
+          Value: production
+
+  URLShortenerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: url-shortener-api
+      Handler: app.main.handler
+      CodeUri: ./
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref URLTable
+      Events:
+        RootEvent:
+          Type: Api
+          Properties:
+            Path: /
+            Method: ANY
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/"
+  DynamoDBTableName:
+    Value: !Ref URLTable
+  LambdaFunctionArn:
+    Value: !GetAtt URLShortenerFunction.Arn
